@@ -1,6 +1,97 @@
+# --- Asteroid and Planet Classes ---
+
 import pygame
 import numpy as np
 import sys
+
+
+class Planet:
+    def __init__(self, mass, orbit_radius, orbital_velocity, color, name):
+        self.mass = mass
+        self.orbit_radius = orbit_radius
+        self.orbital_velocity = orbital_velocity
+        self.color = color
+        self.name = name
+
+    def get_position(self, t):
+        if self.name == "Sun":
+            return np.array([0.0, 0.0])
+        # Circular orbit, starting at +x axis
+        angle = (self.orbital_velocity / self.orbit_radius) * t
+        return np.array(
+            [self.orbit_radius * np.cos(angle), self.orbit_radius * np.sin(angle)]
+        )
+
+
+class Asteroid:
+    def __init__(self, pos, vel, mass=1e-12):
+        self.pos = np.array(pos, dtype=float)
+        self.vel = np.array(vel, dtype=float)
+        self.mass = mass
+        self.trail = []
+
+    def update(self, dt, t, all_bodies, *args, **kwargs):
+        # Planets are affected by gravity of all other bodies (including asteroids, sun, other planets)
+        accel = self.get_acceleration(all_bodies, t)
+        # For sun, skip movement
+        if self.name == "Sun":
+            return
+        # Update velocity and position
+        v = self.get_velocity_vector(t)
+        v += accel * dt
+        # Update orbital parameters (approximate)
+        pos = self.get_position(t) + v * dt
+        self.orbit_radius = np.linalg.norm(pos)
+        self.orbital_velocity = np.linalg.norm(v)
+
+    def get_acceleration(self, all_bodies, t):
+        total_accel = np.zeros(2)
+        my_pos = self.get_position(t)
+        for body in all_bodies:
+            if body is self:
+                continue
+            if isinstance(body, Asteroid):
+                body_pos = body.pos
+            else:
+                body_pos = body.get_position(t)
+            r = my_pos - body_pos
+            dist = np.linalg.norm(r)
+            if dist == 0:
+                continue
+            total_accel += -G * body.mass * r / dist**3
+        return total_accel
+
+    def get_velocity_vector(self, t):
+        # Returns the velocity vector in 2D for the current orbit
+        if self.name == "Sun":
+            return np.zeros(2)
+        angle = (self.orbital_velocity / self.orbit_radius) * t
+        # Perpendicular to radius vector (counterclockwise)
+        vx = (
+            -self.orbit_radius
+            * np.sin(angle)
+            * (self.orbital_velocity / self.orbit_radius)
+        )
+        vy = (
+            self.orbit_radius
+            * np.cos(angle)
+            * (self.orbital_velocity / self.orbit_radius)
+        )
+        return np.array([vx, vy])
+
+    def draw(self, screen, center, scale, color, show_trail):
+        asteroid_screen = (
+            int(center[0] + self.pos[0] * scale),
+            int(center[1] + self.pos[1] * scale),
+        )
+        if show_trail and len(self.trail) > 1:
+            points = [
+                (int(center[0] + p[0] * scale), int(center[1] + p[1] * scale))
+                for p in self.trail
+            ]
+            pygame.draw.lines(screen, (180, 180, 180), False, points, 2)
+        pygame.draw.circle(screen, color, asteroid_screen, 4)
+
 
 # --- Physics Constants ---
 G = 2.959e-4  # AU^3 / (solar_mass * day^2)
@@ -15,18 +106,20 @@ JUPITER_ORBIT_RADIUS = 5.2
 EARTH_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / EARTH_ORBIT_RADIUS)
 JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
 
+
 # --- Pygame Setup ---
-WIDTH, HEIGHT = 900, 900
+pygame.init()
+INFO = pygame.display.Info()
+WIDTH, HEIGHT = INFO.current_w, INFO.current_h
 CENTER = (WIDTH // 2, HEIGHT // 2)
-SCALE = 300  # AU to pixels
+SCALE = min(WIDTH, HEIGHT) // 3  # AU to pixels, keep orbits visible
 FPS = 60
 
 # --- Asteroid Colors ---
 COLOR1 = (200, 200, 200)  # Light gray
 COLOR2 = (255, 80, 80)  # Red
 
-pygame.init()
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
 pygame.display.set_caption("Asteroid Deflection Game")
 clock = pygame.time.Clock()
 font = pygame.font.SysFont("Arial", 20)
@@ -105,6 +198,7 @@ ASTEROID_UNC_VEL = 0.003  # Uncertainty range for velocity (AU/day)
 NUM_ASTEROIDS = 7
 
 
+# Helper to generate asteroid objects
 def generate_asteroids():
     asteroids = []
     for _ in range(NUM_ASTEROIDS):
@@ -114,7 +208,7 @@ def generate_asteroids():
         vel = ASTEROID_BASE_VEL + np.random.uniform(
             -ASTEROID_UNC_VEL, ASTEROID_UNC_VEL, 2
         )
-        asteroids.append(np.concatenate([pos, vel]))
+        asteroids.append(Asteroid(pos, vel, ASTEROID_MASS))
     return asteroids
 
 
@@ -136,44 +230,6 @@ star_positions = [
 ]
 
 
-# --- Physics Functions ---
-def get_planet_state(time_days):
-    # Circular orbits, starting at +x axis
-    angle_earth = (EARTH_ORBITAL_VELOCITY / EARTH_ORBIT_RADIUS) * time_days
-    pos_earth = np.array(
-        [
-            EARTH_ORBIT_RADIUS * np.cos(angle_earth),
-            EARTH_ORBIT_RADIUS * np.sin(angle_earth),
-        ]
-    )
-    angle_jupiter = (JUPITER_ORBITAL_VELOCITY / JUPITER_ORBIT_RADIUS) * time_days
-    pos_jupiter = np.array(
-        [
-            JUPITER_ORBIT_RADIUS * np.cos(angle_jupiter),
-            JUPITER_ORBIT_RADIUS * np.sin(angle_jupiter),
-        ]
-    )
-    return pos_earth, pos_jupiter
-
-
-def asteroid_accel(pos, vel, t):
-    pos_earth, pos_jupiter = get_planet_state(t)
-    pos_sun = np.array([0, 0])
-    # Gravitational forces
-    r_sun = pos - pos_sun
-    r_earth = pos - pos_earth
-    r_jupiter = pos - pos_jupiter
-    accel_sun = -G * M_SUN * r_sun / np.linalg.norm(r_sun) ** 3
-    accel_earth = -G * M_EARTH * r_earth / np.linalg.norm(r_earth) ** 3
-    accel_jupiter = -G * M_JUPITER * r_jupiter / np.linalg.norm(r_jupiter) ** 3
-    total_accel = accel_sun + accel_earth + accel_jupiter
-    # Laser thrust
-    if laser_start_time <= t < laser_start_time + laser_duration:
-        thrust_direction = -vel / np.linalg.norm(vel)
-        total_accel += laser_thrust * thrust_direction
-    return total_accel
-
-
 # --- Game Loop ---
 def main():
     global laser_thrust, laser_duration, laser_start_time
@@ -189,13 +245,30 @@ def main():
     global dt, show_trail
     running = True
     t = 0
-    trajectories = [[] for _ in range(NUM_ASTEROIDS)]
+    # Create celestial bodies: Sun, planets, asteroids
+    sun = Planet(M_SUN, 0.0, 0.0, (255, 215, 0), "Sun")
+    earth = Planet(
+        M_EARTH, EARTH_ORBIT_RADIUS, EARTH_ORBITAL_VELOCITY, (0, 100, 255), "Earth"
+    )
+    jupiter = Planet(
+        M_JUPITER,
+        JUPITER_ORBIT_RADIUS,
+        JUPITER_ORBITAL_VELOCITY,
+        (255, 140, 0),
+        "Jupiter",
+    )
+    planets = [sun, earth, jupiter]
     paused = False
+    # All sliders on the left side, vertical stack
+    slider_x = 30
+    slider_y = 60
+    slider_w = 350 if WIDTH > 1400 else 250
+    slider_gap = 50
     sliders = [
         Slider(
-            650,
-            60,
-            200,
+            slider_x,
+            slider_y + slider_gap * 0,
+            slider_w,
             1e-9,
             1e-7,
             laser_thrust,
@@ -204,9 +277,9 @@ def main():
             fmt="{:.1e}",
         ),
         Slider(
-            650,
-            100,
-            200,
+            slider_x,
+            slider_y + slider_gap * 1,
+            slider_w,
             1,
             100,
             laser_duration,
@@ -214,28 +287,128 @@ def main():
             step=1,
             fmt="{:.0f}",
         ),
-        Slider(650, 140, 200, 0.01, 0.2, ASTEROID_UNC_POS, "Ast Unc Pos", step=0.01),
-        Slider(650, 180, 200, 0.001, 0.01, ASTEROID_UNC_VEL, "Ast Unc Vel", step=0.001),
         Slider(
-            650, 220, 200, 1, 2000, NUM_ASTEROIDS, "Num Asteroids", step=1, fmt="{:.0f}"
-        ),
-        Slider(650, 260, 200, 0.5, 2.0, EARTH_ORBIT_RADIUS, "Earth Radius", step=0.01),
-        Slider(
-            650, 300, 200, 1.0, 7.0, JUPITER_ORBIT_RADIUS, "Jupiter Radius", step=0.01
-        ),
-        Slider(
-            650, 340, 200, 1e-6, 1e-5, M_EARTH, "Earth Mass", step=1e-7, fmt="{:.1e}"
+            slider_x,
+            slider_y + slider_gap * 2,
+            slider_w,
+            0.01,
+            0.2,
+            ASTEROID_UNC_POS,
+            "Ast Unc Pos",
+            step=0.01,
         ),
         Slider(
-            650,
-            380,
-            200,
+            slider_x,
+            slider_y + slider_gap * 3,
+            slider_w,
+            0.001,
+            0.01,
+            ASTEROID_UNC_VEL,
+            "Ast Unc Vel",
+            step=0.001,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 4,
+            slider_w,
+            1,
+            2000,
+            NUM_ASTEROIDS,
+            "Num Asteroids",
+            step=1,
+            fmt="{:.0f}",
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 5,
+            slider_w,
+            0.5,
+            2.0,
+            EARTH_ORBIT_RADIUS,
+            "Earth Radius",
+            step=0.01,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 6,
+            slider_w,
+            1.0,
+            7.0,
+            JUPITER_ORBIT_RADIUS,
+            "Jupiter Radius",
+            step=0.01,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 7,
+            slider_w,
+            1e-6,
+            1e-5,
+            M_EARTH,
+            "Earth Mass",
+            step=1e-7,
+            fmt="{:.1e}",
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 8,
+            slider_w,
             1e-4,
             2e-3,
             M_JUPITER,
             "Jupiter Mass",
             step=1e-5,
             fmt="{:.1e}",
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 9,
+            slider_w,
+            -2.0,
+            2.0,
+            ASTEROID_BASE_POS[0],
+            "Ast Base Pos X",
+            step=0.01,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 10,
+            slider_w,
+            -2.0,
+            2.0,
+            ASTEROID_BASE_POS[1],
+            "Ast Base Pos Y",
+            step=0.01,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 11,
+            slider_w,
+            -0.05,
+            0.05,
+            ASTEROID_BASE_VEL[0],
+            "Ast Base Vel X",
+            step=0.001,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 12,
+            slider_w,
+            -0.05,
+            0.05,
+            ASTEROID_BASE_VEL[1],
+            "Ast Base Vel Y",
+            step=0.001,
+        ),
+        Slider(
+            slider_x,
+            slider_y + slider_gap * 13,
+            slider_w,
+            0.1,
+            10.0,
+            dt,
+            "dt (days/frame)",
+            step=0.01,
         ),
     ]
     # --- Window Control Buttons ---
@@ -306,8 +479,19 @@ def main():
                 JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
                 M_EARTH = sliders[7].value
                 M_JUPITER = sliders[8].value
+                ASTEROID_BASE_POS[0] = sliders[9].value
+                ASTEROID_BASE_POS[1] = sliders[10].value
+                ASTEROID_BASE_VEL[0] = sliders[11].value
+                ASTEROID_BASE_VEL[1] = sliders[12].value
+                dt = sliders[13].value
+                # Update planet objects
+                earth.mass = M_EARTH
+                earth.orbit_radius = EARTH_ORBIT_RADIUS
+                earth.orbital_velocity = EARTH_ORBITAL_VELOCITY
+                jupiter.mass = M_JUPITER
+                jupiter.orbit_radius = JUPITER_ORBIT_RADIUS
+                jupiter.orbital_velocity = JUPITER_ORBITAL_VELOCITY
                 asteroids = generate_asteroids()
-                trajectories = [[] for _ in range(NUM_ASTEROIDS)]
             if event.type == pygame.QUIT:
                 running = False
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -325,92 +509,6 @@ def main():
                         pygame.display.set_mode((WIDTH, HEIGHT))
             # --- User Controls ---
             if event.type == pygame.KEYDOWN:
-                # Laser controls (L/I/O/P)
-                if event.key == pygame.K_l:
-                    laser_thrust *= 1.2
-                if event.key == pygame.K_i:
-                    laser_thrust /= 1.2
-                if event.key == pygame.K_o:
-                    laser_duration += 5
-                if event.key == pygame.K_p:
-                    laser_duration = max(0, laser_duration - 5)
-                # Asteroid uncertainty controls (T/G for pos, Y/H for vel, U/J for number)
-                if event.key == pygame.K_t:
-                    ASTEROID_UNC_POS += 0.01
-                if event.key == pygame.K_g:
-                    ASTEROID_UNC_POS = max(0, ASTEROID_UNC_POS - 0.01)
-                if event.key == pygame.K_y:
-                    ASTEROID_UNC_VEL += 0.001
-                if event.key == pygame.K_h:
-                    ASTEROID_UNC_VEL = max(0, ASTEROID_UNC_VEL - 0.001)
-                if event.key == pygame.K_u:
-                    NUM_ASTEROIDS = min(2000, NUM_ASTEROIDS + 1)
-                if event.key == pygame.K_j:
-                    NUM_ASTEROIDS = max(1, NUM_ASTEROIDS - 1)
-                # Regenerate asteroids with new uncertainty/number
-                if event.key in [
-                    pygame.K_t,
-                    pygame.K_g,
-                    pygame.K_y,
-                    pygame.K_h,
-                    pygame.K_u,
-                    pygame.K_j,
-                ]:
-                    asteroids = generate_asteroids()
-                    trajectories = [[] for _ in range(NUM_ASTEROIDS)]
-                # Asteroid base controls (move all, WASD replaced with F/V/B/N for vel, R/F/C/X for pos)
-                if event.key == pygame.K_f:
-                    ASTEROID_BASE_VEL[1] += 0.001
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_v:
-                    ASTEROID_BASE_VEL[1] -= 0.001
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_b:
-                    ASTEROID_BASE_VEL[0] -= 0.001
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_n:
-                    ASTEROID_BASE_VEL[0] += 0.001
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_r:
-                    ASTEROID_BASE_POS[1] += 0.05
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_f:
-                    ASTEROID_BASE_POS[1] -= 0.05
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_c:
-                    ASTEROID_BASE_POS[0] -= 0.05
-                    asteroids = generate_asteroids()
-                if event.key == pygame.K_x:
-                    ASTEROID_BASE_POS[0] += 0.05
-                    asteroids = generate_asteroids()
-                # Earth controls (Q/E)
-                if event.key == pygame.K_q:
-                    EARTH_ORBIT_RADIUS += 0.1
-                    EARTH_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / EARTH_ORBIT_RADIUS)
-                if event.key == pygame.K_e:
-                    EARTH_ORBIT_RADIUS = max(0.5, EARTH_ORBIT_RADIUS - 0.1)
-                    EARTH_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / EARTH_ORBIT_RADIUS)
-                # Jupiter controls (Z/X)
-                if event.key == pygame.K_z:
-                    JUPITER_ORBIT_RADIUS += 0.2
-                    JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
-                if event.key == pygame.K_x:
-                    JUPITER_ORBIT_RADIUS = max(1.0, JUPITER_ORBIT_RADIUS - 0.2)
-                    JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
-                # Sun mass (S/D)
-                if event.key == pygame.K_s:
-                    M_SUN *= 1.05
-                    EARTH_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / EARTH_ORBIT_RADIUS)
-                    JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
-                if event.key == pygame.K_d:
-                    M_SUN /= 1.05
-                    EARTH_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / EARTH_ORBIT_RADIUS)
-                    JUPITER_ORBITAL_VELOCITY = np.sqrt(G * M_SUN / JUPITER_ORBIT_RADIUS)
-                # Simulation speed (A/W)
-                if event.key == pygame.K_a:
-                    dt *= 1.2
-                if event.key == pygame.K_w:
-                    dt = max(0.1, dt / 1.2)
                 # Pause/resume (SPACE)
                 if event.key == pygame.K_SPACE:
                     paused = not paused
@@ -424,124 +522,74 @@ def main():
                     trajectories = [[] for _ in range(NUM_ASTEROIDS)]
         # --- Physics Update ---
         if not paused:
-            for i in range(NUM_ASTEROIDS):
-                pos = asteroids[i][:2]
-                vel = asteroids[i][2:]
-                accel = asteroid_accel(pos, vel, t)
-                vel += accel * dt
-                pos += vel * dt
-                asteroids[i] = np.concatenate([pos, vel])
-                trajectories[i].append(pos.copy())
+            # Combine all bodies for mutual gravity
+            all_bodies = planets + asteroids
+            # Update asteroids
+            for asteroid in asteroids:
+                asteroid.update(
+                    dt, t, all_bodies, laser_thrust, laser_start_time, laser_duration
+                )
+            # Update planets (except sun)
+            for planet in planets:
+                planet.update(dt, t, all_bodies)
             t += dt
         # --- Drawing ---
         # Starry background (use fixed star positions)
         screen.fill((10, 10, 30))
         for x, y in star_positions:
             pygame.draw.circle(screen, (255, 255, 255), (x, y), 1)
+        # Draw left UI border
+        border_x = slider_x + slider_w + 30
+        pygame.draw.line(screen, (200, 200, 200), (border_x, 0), (border_x, HEIGHT), 3)
         # Draw window control buttons
         draw_window_buttons()
-        # Draw Sun
-        pygame.draw.circle(screen, (255, 215, 0), CENTER, 15)
-        # Draw Earth orbit
-        pygame.draw.circle(
-            screen, (0, 80, 200), CENTER, int(EARTH_ORBIT_RADIUS * SCALE), 1
-        )
-        # Draw Jupiter orbit
-        pygame.draw.circle(
-            screen, (200, 120, 0), CENTER, int(JUPITER_ORBIT_RADIUS * SCALE), 1
-        )
-        # Draw Earth
-        pos_earth, pos_jupiter = get_planet_state(t)
-        earth_screen = (
-            int(CENTER[0] + pos_earth[0] * SCALE),
-            int(CENTER[1] + pos_earth[1] * SCALE),
-        )
-        pygame.draw.circle(screen, (0, 100, 255), earth_screen, 10)
-        # Draw Jupiter
-        jupiter_screen = (
-            int(CENTER[0] + pos_jupiter[0] * SCALE),
-            int(CENTER[1] + pos_jupiter[1] * SCALE),
-        )
-        pygame.draw.circle(screen, (255, 140, 0), jupiter_screen, 13)
-        # Draw Asteroids and Trajectories
-        for i in range(NUM_ASTEROIDS):
-            pos = asteroids[i][:2]
-            asteroid_screen = (
-                int(CENTER[0] + pos[0] * SCALE),
-                int(CENTER[1] + pos[1] * SCALE),
+        # Draw sliders
+        for s in sliders:
+            s.draw(screen)
+        # Draw simulation area (everything right of border)
+        sim_offset_x = border_x
+        # Draw Sun and planets
+        sim_center = (int((WIDTH + border_x) // 2), HEIGHT // 2)
+        for planet in planets:
+            if planet.name != "Sun":
+                pygame.draw.circle(
+                    screen,
+                    (200, 200, 200),
+                    sim_center,
+                    int(planet.orbit_radius * SCALE),
+                    1,
+                )
+            planet_pos = planet.get_position(t)
+            planet_screen = (
+                int(sim_center[0] + planet_pos[0] * SCALE),
+                int(sim_center[1] + planet_pos[1] * SCALE),
             )
-            # Draw original trail (single polyline, no fading)
-            if show_trail and len(trajectories[i]) > 1:
-                points = [
-                    (int(CENTER[0] + p[0] * SCALE), int(CENTER[1] + p[1] * SCALE))
-                    for p in trajectories[i]
-                ]
-                pygame.draw.lines(screen, (180, 180, 180), False, points, 2)
-            # Alternate asteroid color
+            if planet.name == "Sun":
+                pygame.draw.circle(screen, planet.color, planet_screen, 15)
+            else:
+                pygame.draw.circle(
+                    screen,
+                    planet.color,
+                    planet_screen,
+                    10 if planet.name == "Earth" else 13,
+                )
+        # Draw Asteroids and Trajectories
+        for i, asteroid in enumerate(asteroids):
             color = COLOR1 if i < NUM_ASTEROIDS // 2 else COLOR2
-            pygame.draw.circle(screen, color, asteroid_screen, 4)
-        # Draw Info
+            asteroid.draw(screen, sim_center, SCALE, color, show_trail)
+        # Draw Info (minimal, only simulation state and trail toggle)
         sim_state = font.render(
             f"Simulation: {'PAUSED' if paused else 'RUNNING'} (SPACE)",
             True,
             (255, 100, 100) if paused else (100, 255, 100),
         )
-        info1 = font.render(
-            f"Laser Thrust: {laser_thrust:.1e} AU/day^2 (L/I)",
-            True,
-            (255, 255, 255),
-        )
-        info2 = font.render(
-            f"Laser Duration: {laser_duration} days (O/P)", True, (255, 255, 255)
-        )
-        info3 = font.render(
-            f"Asteroid Base Pos: [{ASTEROID_BASE_POS[0]:.2f}, {ASTEROID_BASE_POS[1]:.2f}] (R/F/C/X)",
-            True,
-            (200, 200, 255),
-        )
-        info4 = font.render(
-            f"Asteroid Base Vel: [{ASTEROID_BASE_VEL[0]:.3f}, {ASTEROID_BASE_VEL[1]:.3f}] (F/V/B/N)",
-            True,
-            (200, 200, 255),
-        )
-        info11 = font.render(
-            f"Uncertainty Pos: ±{ASTEROID_UNC_POS:.3f} (T/G)", True, (255, 180, 180)
-        )
-        info12 = font.render(
-            f"Uncertainty Vel: ±{ASTEROID_UNC_VEL:.4f} (Y/H)", True, (255, 180, 180)
-        )
-        info13 = font.render(
-            f"Num Asteroids: {NUM_ASTEROIDS} (U/J)", True, (255, 180, 180)
-        )
-        info5 = font.render(
-            f"Earth Radius: {EARTH_ORBIT_RADIUS:.2f} AU (Q/E)", True, (0, 255, 255)
-        )
-        info6 = font.render(
-            f"Jupiter Radius: {JUPITER_ORBIT_RADIUS:.2f} AU (Z/X)", True, (255, 200, 0)
-        )
-        info7 = font.render(f"Sun Mass: {M_SUN:.2f} (S/D)", True, (255, 255, 0))
-        info8 = font.render(f"dt: {dt:.2f} days/frame (A/W)", True, (255, 255, 255))
         info9 = font.render(
             f"Trail: {'ON' if show_trail else 'OFF'} (TAB)", True, (255, 255, 255)
         )
         info10 = font.render("Press ESC to reset", True, (255, 255, 0))
-        screen.blit(info1, (20, 20))
-        screen.blit(sim_state, (650, 20))
-        screen.blit(info2, (20, 50))
-        screen.blit(info3, (20, 80))
-        screen.blit(info4, (20, 110))
-        screen.blit(info5, (20, 140))
-        screen.blit(info6, (20, 170))
-        screen.blit(info7, (20, 200))
-        screen.blit(info8, (20, 230))
-        screen.blit(info9, (20, 260))
-        screen.blit(info10, (20, 290))
-        screen.blit(info11, (20, 320))
-        screen.blit(info12, (20, 350))
-        screen.blit(info13, (20, 380))
-        # Draw sliders
-        for s in sliders:
-            s.draw(screen)
+        screen.blit(sim_state, (slider_x, 15))
+        screen.blit(info9, (slider_x, HEIGHT - 60))
+        screen.blit(info10, (slider_x, HEIGHT - 30))
         pygame.display.flip()
         clock.tick(FPS)
     pygame.quit()
