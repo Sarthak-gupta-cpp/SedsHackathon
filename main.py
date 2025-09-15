@@ -115,7 +115,7 @@ def main():
             slider_x,
             slider_y + slider_gap * 2,
             slider_w,
-            0.01,
+            0.00,
             0.2,
             ASTEROID_UNC_POS,
             "Ast Unc Pos",
@@ -125,7 +125,7 @@ def main():
             slider_x,
             slider_y + slider_gap * 3,
             slider_w,
-            0.001,
+            0.000,
             0.01,
             ASTEROID_UNC_VEL,
             "Ast Unc Vel",
@@ -305,7 +305,7 @@ def main():
                     t = 0
                     asteroids = generate_asteroids()
         if not paused:
-            all_bodies = planets + asteroids
+            all_bodies = planets
             for asteroid in asteroids:
                 asteroid.update(
                     dt, t, all_bodies, laser_thrust, laser_start_time, laser_duration
